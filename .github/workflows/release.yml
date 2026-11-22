@@ -1,0 +1,58 @@
+name: release
+
+# The tag's name is the package's name: v<pi version>-<revision> (v1.6.0-1).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      pi_version:
+        description: 'the upstream version (1.6.0)'
+        required: true
+      rev:
+        description: 'the revision of this package (1)'
+        required: true
+      min_app_version:
+        description: 'the oldest app that can use it'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: the package's shape out of the tag
+        id: shape
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          tag="${tag#v}"
+          pi_version="${tag%-*}"
+          rev="${tag##*-}"
+          echo "pi_version=$pi_version" >> "$GITHUB_OUTPUT"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: build the package
+        run: |
+          python3 build.py \
+            --pi-version "${{ steps.shape.outputs.pi_version }}" \
+            --rev "${{ steps.shape.outputs.rev }}" \
+            --min-app-version "${{ inputs.min_app_version || '0.3.0-alpha15' }}"
+
+      - name: publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "pi-agent ${GITHUB_REF_NAME}" \
+            --notes "The coding agent for the phone: pi ${GITHUB_REF_NAME#v}." \
+            dist/pi-agent-*.zip
