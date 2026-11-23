@@ -27,9 +27,20 @@ assets/                the engine's own assets
 theme/                 the engine's theme
 photon_rs_bg.wasm      the module the engine renders with
 package.json           the upstream's own file
+extensions/            the pi extensions the phone can load on demand
 ```
 
 The upstream's documentation and examples are left behind: the phone has no use for them.
+
+## The extensions
+
+`extensions/<name>/` holds a pi extension: its compiled JavaScript, its skills and the packages it
+needs at run time. They come from the npm registry, pinned by version and by digest in
+`extensions.lock.json`.
+
+They sit beside the engine, not in the engine's home, so **pi does not load them on its own**:
+the app points at them when the player turns the feature on. An extension nobody loads costs
+nothing but the disk it takes (the first one, `pi-subagents`, is about 8 MB).
 
 ## The manifest
 
@@ -39,7 +50,8 @@ The upstream's documentation and examples are left behind: the phone has no use 
   "version": "r1.6.0-1",
   "sha256": "…",
   "minAppVersion": "0.3.0-alpha15",
-  "piVersion": "1.6.0"
+  "piVersion": "1.6.0",
+  "extensions": ["pi-subagents"]
 }
 ```
 
@@ -49,6 +61,7 @@ The upstream's documentation and examples are left behind: the phone has no use 
 - `minAppVersion` — the oldest app that can use the package. An older app refuses it instead of
   installing something it cannot run.
 - `piVersion` — the upstream version the package was built from.
+- `extensions` — the extensions the package carries. The app decides whether to load them.
 
 ## Building a package
 

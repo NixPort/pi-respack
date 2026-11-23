@@ -11,10 +11,16 @@ The upstream release carries a standalone Linux arm64 binary (a Bun build) and t
 for beside itself. The package keeps the binary, those files and a manifest; the documentation and
 the examples stay behind (the phone has no use for them).
 
+The package also carries the pi extensions the phone can load on demand (extensions.lock.json says
+which ones, at which versions). They sit in their own folder beside the engine, so pi does not load
+them by itself: the app points at them when the player turns the feature on, and an extension that
+nobody loads costs nothing but the disk it takes.
+
 The manifest says what the package is (its version), what the binary's digest is (the app checks it
 before the engine is put in place) and which app version the package needs (an older app refuses it).
 """
 import argparse
+import base64
 import hashlib
 import json
 import shutil
@@ -26,6 +32,12 @@ import zipfile
 from pathlib import Path
 
 UPSTREAM = 'https://github.com/earendil-works/pi/releases/download'
+
+# The npm registry: the pi extensions come from there.
+NPM = 'https://registry.npmjs.org'
+
+# The extensions the package carries, with the versions and the digests they are pinned to.
+LOCK = Path(__file__).resolve().parent / 'extensions.lock.json'
 
 # The files the engine needs beside itself: the native addon, the assets, the theme and the wasm
 # module it renders with.
@@ -60,6 +72,81 @@ def upstream_digest(version: str, cache: Path) -> str:
         if len(parts) == 2 and parts[1].lstrip('*') == 'pi-linux-arm64.tar.gz':
             return parts[0].lower()
     raise SystemExit(f'the upstream release v{version} does not publish the digest of pi-linux-arm64.tar.gz')
+
+
+def npm_tarball(name: str, version: str) -> str:
+    """Where the registry keeps one package's tarball."""
+    return f'{NPM}/{name}/-/{name.split("/")[-1]}-{version}.tgz'
+
+
+def npm_integrity(data: bytes) -> str:
+    """The digest npm publishes for a tarball (sha512, base64)."""
+    return 'sha512-' + base64.b64encode(hashlib.sha512(data).digest()).decode()
+
+
+def fetch_npm(name: str, version: str, integrity: str, cache: Path) -> Path:
+    """Downloads one package and checks it against the digest the lock file carries."""
+    path = cache / 'npm' / f'{name.replace("/", "+")}-{version}.tgz'
+    if not path.exists():
+        fetch(npm_tarball(name, version), path)
+    got = npm_integrity(path.read_bytes())
+    if got != integrity:
+        raise SystemExit(f'{name}@{version} is not the one the registry published ({got} != {integrity})')
+    return path
+
+
+def unpack_npm(tarball: Path, dest: Path) -> None:
+    """Unpacks one npm tarball: every one of them keeps its files under a 'package' folder.
+
+    The type declarations are left behind — the phone runs the code, it does not type-check it.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tarball) as tar:
+        members = []
+        for member in tar.getmembers():
+            parts = member.name.split('/', 1)
+            if len(parts) < 2 or parts[0] != 'package' or member.name.endswith('.d.ts'):
+                continue
+            member.name = parts[1]
+            members.append(member)
+        tar.extractall(dest, members=members, filter='data')
+
+
+def vendor_extensions(stage: Path, cache: Path) -> list[str]:
+    """Puts the pi extensions the phone can load into the package.
+
+    They live in their own folder beside the engine, not in the engine's home: pi does not find
+    them on its own, so the app points at them when the player turns the feature on. An extension
+    that nobody loads costs nothing but the disk it takes.
+
+    The lock file carries the versions and the digests; the sources are the npm registry.
+    """
+    lock = json.loads(LOCK.read_text())
+    names = []
+    for spec in lock['extensions']:
+        dest = stage / 'extensions' / spec['dir']
+        with tempfile.TemporaryDirectory() as tmp:
+            unpacked = Path(tmp) / spec['dir']
+            unpack_npm(fetch_npm(spec['package'], spec['version'], spec['integrity'], cache), unpacked)
+            dest.mkdir(parents=True, exist_ok=True)
+            for name in spec['files']:
+                source = unpacked / name
+                if not source.exists():
+                    print(f'>> {spec["package"]} does not carry {name}: skipped')
+                    continue
+                if source.is_dir():
+                    shutil.copytree(source, dest / name, ignore=shutil.ignore_patterns('*.d.ts'))
+                else:
+                    shutil.copy2(source, dest / name)
+        for dep in spec.get('dependencies', []):
+            unpack_npm(fetch_npm(dep['name'], dep['version'], dep['integrity'], cache),
+                       dest / 'node_modules' / dep['name'])
+        # the entry: the compiled JavaScript. The TypeScript sources stay behind — the phone loads
+        # the extension through pi's own loader, which reads the compiled files.
+        (dest / spec['entry']).write_text(f'import ext from "{spec["target"]}";\nexport default ext;\n')
+        names.append(spec['dir'])
+        print(f'>> the extension {spec["package"]}@{spec["version"]} is in the package')
+    return names
 
 
 def main() -> int:
@@ -106,12 +193,14 @@ def main() -> int:
                 shutil.copy2(path, stage / name)
 
         binary = stage / 'pi'
+        extensions = vendor_extensions(stage, cache)
         manifest = {
             'name': NAME,
             'version': version,
             'sha256': sha256_of(binary),
             'minAppVersion': a.min_app_version,
             'piVersion': a.pi_version,
+            'extensions': extensions,
         }
         (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
