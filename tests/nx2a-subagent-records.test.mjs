@@ -59,75 +59,105 @@ function putTranscript(root, sessionId, name, rounds) {
     return path;
 }
 
+/** 会话文件：引擎自己的账本（跑完的记录与派生它们的调用都在里面）。 */
+function sessionFile(root, sessionId, lines = []) {
+    const path = join(root, `${sessionId}.jsonl`);
+    const header = JSON.stringify({
+        type: "session", version: 3, id: sessionId, timestamp: "2026-11-24T06:00:00.000Z", cwd: "/tmp/work",
+    });
+    writeFileSync(path, [header, ...lines.map(line => JSON.stringify(line))].join("\n") + "\n");
+    return path;
+}
+
 /** 引擎交给扩展的那个上下文。 */
-function fakeCtx(sessionId, branch = []) {
+function fakeCtx(sessionId, file) {
     return {
         cwd: "/tmp/work",
         sessionManager: {
             getSessionId: () => sessionId,
-            getSessionFile: () => `/tmp/sessions/${sessionId}.jsonl`,
-            getBranch: () => branch,
+            getSessionFile: () => file,
+            getBranch: () => [],
         },
     };
 }
 
-test("a transcript without a record is adopted as interrupted", () => {
-    const root = mkdtempSync(join(tmpdir(), "nx2a-test-"));
+/** 引擎写下的那条记录。 */
+function record(id) {
+    return { type: "custom", customType: "subagents:record", data: { id } };
+}
+
+/** 派生它的那次调用与它的结果。 */
+function spawn(id) {
+    return [
+        {
+            type: "message",
+            message: {
+                role: "assistant",
+                content: [{
+                    type: "toolCall",
+                    id: "call-1",
+                    name: "Agent",
+                    arguments: { subagent_type: "gamespec", description: "fix the crash" },
+                }],
+            },
+        },
+        {
+            type: "message",
+            message: {
+                role: "toolResult",
+                toolCallId: "call-1",
+                content: [{ type: "text", text: `Agent started in background.\nAgent ID: ${id}\n` }],
+            },
+        },
+    ];
+}
+
+/** 跑一次认领：造好现场，让扩展认领，返回它追加的记录。 */
+function run(root, { sessionId = "sess-1", rounds = 1, lines = [] } = {}) {
     const previous = process.env.TMPDIR;
     process.env.TMPDIR = root;
     try {
-        putTranscript(root, "sess-1", "agent-1.output", 1);
+        putTranscript(root, sessionId, "agent-1.output", rounds);
+        const file = sessionFile(root, sessionId, lines);
         const pi = fakePi();
         extension(pi.api);
-        pi.handlers.session_start({}, fakeCtx("sess-1"));
-        assert.equal(pi.appended.length, 1);
-        assert.equal(pi.appended[0].type, "subagents:record");
-        assert.equal(pi.appended[0].data.id, "agent-1");
-        assert.equal(pi.appended[0].data.status, "interrupted");
-        assert.equal(pi.appended[0].data.startedAt, Date.parse("2026-11-24T06:00:00.000Z"));
-        assert.ok(pi.appended[0].data.error.length > 0);
+        pi.handlers.session_start({}, fakeCtx(sessionId, file));
+        return pi.appended;
     }
     finally {
         if (previous === undefined) delete process.env.TMPDIR;
         else process.env.TMPDIR = previous;
     }
+}
+
+test("a transcript without a record is adopted as interrupted", () => {
+    const appended = run(mkdtempSync(join(tmpdir(), "nx2a-test-")));
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].type, "subagents:record");
+    assert.equal(appended[0].data.id, "agent-1");
+    assert.equal(appended[0].data.status, "interrupted");
+    assert.equal(appended[0].data.startedAt, Date.parse("2026-11-24T06:00:00.000Z"));
+    assert.ok(appended[0].data.error.length > 0);
+});
+
+test("the spawn call gives the run its type and its task", () => {
+    const appended = run(mkdtempSync(join(tmpdir(), "nx2a-test-")), { lines: spawn("agent-1") });
+    assert.equal(appended[0].data.type, "gamespec");
+    assert.equal(appended[0].data.description, "fix the crash");
 });
 
 test("a finished run is left alone", () => {
-    const root = mkdtempSync(join(tmpdir(), "nx2a-test-"));
-    const previous = process.env.TMPDIR;
-    process.env.TMPDIR = root;
-    try {
-        putTranscript(root, "sess-1", "agent-1.output", 1);
-        const branch = [{ type: "custom", customType: "subagents:record", data: { id: "agent-1" } }];
-        const pi = fakePi();
-        extension(pi.api);
-        pi.handlers.session_start({}, fakeCtx("sess-1", branch));
-        assert.equal(pi.appended.length, 0);
-    }
-    finally {
-        if (previous === undefined) delete process.env.TMPDIR;
-        else process.env.TMPDIR = previous;
-    }
+    const appended = run(mkdtempSync(join(tmpdir(), "nx2a-test-")), { lines: [record("agent-1")] });
+    assert.equal(appended.length, 0);
 });
 
 test("only the missing rounds of a resumed agent are adopted", () => {
-    const root = mkdtempSync(join(tmpdir(), "nx2a-test-"));
-    const previous = process.env.TMPDIR;
-    process.env.TMPDIR = root;
-    try {
-        putTranscript(root, "sess-1", "agent-1.output", 2);
-        const branch = [{ type: "custom", customType: "subagents:record", data: { id: "agent-1" } }];
-        const pi = fakePi();
-        extension(pi.api);
-        pi.handlers.session_start({}, fakeCtx("sess-1", branch));
-        assert.equal(pi.appended.length, 1);
-        assert.equal(pi.appended[0].data.startedAt, Date.parse("2026-11-24T06:01:00.000Z"));
-    }
-    finally {
-        if (previous === undefined) delete process.env.TMPDIR;
-        else process.env.TMPDIR = previous;
-    }
+    const appended = run(mkdtempSync(join(tmpdir(), "nx2a-test-")), {
+        rounds: 2,
+        lines: [record("agent-1")],
+    });
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].data.startedAt, Date.parse("2026-11-24T06:01:00.000Z"));
 });
 
 test("another session's transcripts are not touched", () => {
@@ -136,9 +166,10 @@ test("another session's transcripts are not touched", () => {
     process.env.TMPDIR = root;
     try {
         putTranscript(root, "sess-other", "agent-2.output", 1);
+        const file = sessionFile(root, "sess-1");
         const pi = fakePi();
         extension(pi.api);
-        pi.handlers.session_start({}, fakeCtx("sess-1"));
+        pi.handlers.session_start({}, fakeCtx("sess-1", file));
         assert.equal(pi.appended.length, 0);
     }
     finally {

@@ -48,12 +48,15 @@ export default function (pi) {
  */
 function adopt(pi, ctx) {
     const sessionId = ctx.sessionManager?.getSessionId?.();
-    if (!sessionId)
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    if (!sessionId || !sessionFile)
         return;
     const dirs = taskDirs(sessionId);
     if (dirs.length === 0)
         return;
-    const recorded = recordedRuns(ctx);
+    // 会话文件是引擎自己的账本：跑完的记录与派生它们的调用都在里面。
+    // 手机那边读的是同一个文件，所以这里也按它的读法数——两边对「缺了几轮」的判断才一致。
+    const ledger = readLedger(sessionFile);
     for (const dir of dirs) {
         for (const name of readdirSync(dir)) {
             if (!name.endsWith(".output"))
@@ -61,10 +64,10 @@ function adopt(pi, ctx) {
             const path = join(dir, name);
             const id = name.slice(0, -".output".length);
             const starts = runStarts(path);
-            const have = recorded.get(id) ?? 0;
+            const have = ledger.records.get(id) ?? 0;
             if (starts.length <= have)
                 continue;
-            const spawn = spawnCall(ctx, id, path);
+            const spawn = spawnCall(ledger, id, path);
             const endedAt = Math.round(statSync(path).mtimeMs);
             for (let index = have; index < starts.length; index++) {
                 pi.appendEntry(RECORD_TYPE, {
@@ -112,18 +115,52 @@ function taskDirs(sessionId) {
     return dirs;
 }
 
-/** 会话里已经写了几条记录（按子代理 id 数）：引擎跑完一次写一条。 */
-function recordedRuns(ctx) {
-    const counts = new Map();
-    for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
-        if (entry?.type !== "custom" || entry?.customType !== RECORD_TYPE)
-            continue;
-        const id = entry?.data?.id;
-        if (typeof id !== "string" || id === "")
-            continue;
-        counts.set(id, (counts.get(id) ?? 0) + 1);
+/**
+ * 会话文件里的两样东西：跑完一次写一条的记录，与派生它们的那些调用。
+ *
+ * 会话刚打开时，引擎的内存账本还不一定装得下旧条目；文件是全的。
+ */
+function readLedger(sessionFile) {
+    const records = new Map();
+    const calls = new Map();
+    const results = [];
+    let text;
+    try {
+        text = readFileSync(sessionFile, "utf-8");
     }
-    return counts;
+    catch {
+        return { records, calls, results };
+    }
+    for (const line of text.split("\n")) {
+        if (line.trim() === "")
+            continue;
+        let entry;
+        try {
+            entry = JSON.parse(line);
+        }
+        catch {
+            continue;   // 写了一半的行
+        }
+        if (entry?.type === "custom" && entry?.customType === RECORD_TYPE) {
+            const id = entry?.data?.id;
+            if (typeof id === "string" && id !== "")
+                records.set(id, (records.get(id) ?? 0) + 1);
+            continue;
+        }
+        const message = entry?.message;
+        const parts = Array.isArray(message?.content) ? message.content : [];
+        for (const part of parts) {
+            if (part?.type === "toolCall" && typeof part.id === "string")
+                calls.set(part.id, part);
+        }
+        if (message?.role !== "toolResult")
+            continue;
+        results.push({
+            toolCallId: message.toolCallId,
+            text: parts.map(part => part?.text ?? "").join("\n"),
+        });
+    }
+    return { records, calls, results };
 }
 
 /**
@@ -163,25 +200,15 @@ function timestampOf(line) {
 /**
  * 派生它的那次调用：类型与描述从那儿来（面板上那个牌子就是它）。
  *
- * 引擎在派生结果里写了子代理的 id 与 transcript 的路径，找到那次调用就认出了它。
+ * 引擎在派生结果里写了子代理的 id 与 transcript 的路径，找到那次结果就认出了它的调用。
  */
-function spawnCall(ctx, id, path) {
-    const entries = ctx.sessionManager?.getBranch?.() ?? [];
-    const calls = new Map();
-    let spawn;
-    for (const entry of entries) {
-        const message = entry?.message;
-        const parts = Array.isArray(message?.content) ? message.content : [];
-        for (const part of parts) {
-            if (part?.type === "toolCall" && typeof part.id === "string")
-                calls.set(part.id, part);
-        }
-        if (message?.role !== "toolResult")
+function spawnCall(ledger, id, path) {
+    for (const result of ledger.results) {
+        if (!result.text.includes(`Agent ID: ${id}`) && !result.text.includes(path))
             continue;
-        const text = parts.map(part => part?.text ?? "").join("\n");
-        if (!text.includes(`Agent ID: ${id}`) && !text.includes(path))
-            continue;
-        spawn = calls.get(message.toolCallId) ?? spawn;
+        const call = ledger.calls.get(result.toolCallId);
+        if (call)
+            return call;
     }
-    return spawn;
+    return undefined;
 }
