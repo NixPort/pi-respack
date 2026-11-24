@@ -119,12 +119,22 @@ def vendor_extensions(stage: Path, cache: Path) -> list[str]:
     them on its own, so the app points at them when the player turns the feature on. An extension
     that nobody loads costs nothing but the disk it takes.
 
-    The lock file carries the versions and the digests; the sources are the npm registry.
+    Most of them come from the npm registry: the lock file carries their versions and digests.
+    An extension of our own (marked "source": "local") lives in this repository — no registry,
+    no digest, it is the code next door.
     """
     lock = json.loads(LOCK.read_text())
     names = []
     for spec in lock['extensions']:
         dest = stage / 'extensions' / spec['dir']
+        if spec.get('source') == 'local':
+            source = Path(__file__).resolve().parent / spec['path']
+            if not source.is_dir():
+                raise SystemExit(f'the extension {spec["dir"]} is missing ({spec["path"]})')
+            shutil.copytree(source, dest, dirs_exist_ok=True)
+            names.append(spec['dir'])
+            print(f'>> the extension {spec["dir"]} (ours) is in the package')
+            continue
         with tempfile.TemporaryDirectory() as tmp:
             unpacked = Path(tmp) / spec['dir']
             unpack_npm(fetch_npm(spec['package'], spec['version'], spec['integrity'], cache), unpacked)

@@ -38,6 +38,10 @@ The upstream's documentation and examples are left behind: the phone has no use 
 needs at run time. They come from the npm registry, pinned by version and by digest in
 `extensions.lock.json`.
 
+One of them is ours: `local-extensions/nx2a-subagent-records` lives in this repository and the lock
+file points at it (`"source": "local"`). It has no dependencies and no digest — it is the code next
+door, and it travels with the package like the others.
+
 They sit beside the engine, not in the engine's home, so **pi does not load them on its own**:
 the app points at them when the player turns the feature on. An extension nobody loads costs
 nothing but the disk it takes (the first one, `pi-subagents`, is about 8 MB).

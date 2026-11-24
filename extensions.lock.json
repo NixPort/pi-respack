@@ -1,6 +1,11 @@
 {
   "extensions": [
     {
+      "dir": "nx2a-subagent-records",
+      "source": "local",
+      "path": "local-extensions/nx2a-subagent-records"
+    },
+    {
       "dir": "pi-subagents",
       "package": "@tintinweb/pi-subagents",
       "version": "0.26.2",
